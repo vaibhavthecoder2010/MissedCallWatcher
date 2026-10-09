@@ -6,7 +6,10 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -117,6 +120,12 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        if (VoiceRec.isRecording()) VoiceRec.stop();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         Store.syncCallLog(this);
@@ -158,6 +167,9 @@ public class MainActivity extends Activity {
                 final String number = Store.last10(o.optString("number"));
                 String name = o.optString("name");
                 boolean done = o.optBoolean("done", false);
+                final boolean booked = o.optBoolean("booked", false);
+                final String nameF = name;
+                final long timeF = o.optLong("time");
 
                 LinearLayout card = new LinearLayout(this);
                 card.setOrientation(LinearLayout.VERTICAL);
@@ -174,7 +186,7 @@ public class MainActivity extends Activity {
                 TextView sub = new TextView(this);
                 String subText = fmt.format(new Date(o.optLong("time")));
                 if (!number.isEmpty() && !name.isEmpty()) subText = name + " \u00B7 " + subText;
-                sub.setText(subText + (done ? " \u00B7 done" : ""));
+                sub.setText(subText + (booked ? " \u00B7 booked" : (done ? " \u00B7 done" : "")));
                 sub.setTextColor(Color.parseColor("#777777"));
                 sub.setPadding(0, 0, 0, dp(6));
                 card.addView(sub);
@@ -188,7 +200,7 @@ public class MainActivity extends Activity {
                     public void onClick(View v) {
                         if (number.length() < 10) { noNumber(); return; }
                         openUri(Intent.ACTION_VIEW, "https://api.whatsapp.com/send?phone=91" + number
-                                + "&text=" + Uri.encode(Store.MESSAGE), null);
+                                + "&text=" + Uri.encode(Store.messageFor(number, nameF)), null);
                     }
                 });
                 Button sms = makeButton("\uD83D\uDCE9 SMS", Color.parseColor("#1D4E5E"));
@@ -196,7 +208,7 @@ public class MainActivity extends Activity {
                     @Override
                     public void onClick(View v) {
                         if (number.length() < 10) { noNumber(); return; }
-                        openUri(Intent.ACTION_SENDTO, "smsto:" + number, Store.MESSAGE);
+                        openUri(Intent.ACTION_SENDTO, "smsto:" + number, Store.messageFor(number, nameF));
                     }
                 });
                 Button call = makeButton("\uD83D\uDCDE Call", Color.parseColor("#8B6512"));
@@ -224,6 +236,84 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams dp2 = new LinearLayout.LayoutParams(dp(48), LinearLayout.LayoutParams.WRAP_CONTENT);
                 btns.addView(doneBtn, dp2);
                 card.addView(btns);
+
+                final boolean recordingThis = id.equals(VoiceRec.recordingId());
+                final boolean hasVoice = VoiceRec.fileFor(id) != null;
+                String micLabel = recordingThis ? "\u23F9 Stop recording"
+                        : (hasVoice ? "\uD83C\uDFA4 \u2713 Re-record" : "\uD83C\uDFA4 Voice note");
+                final Button mic = makeButton(micLabel, Color.parseColor(recordingThis ? "#B23A2E" : "#8A5A12"));
+                mic.setEnabled(!booked);
+                mic.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 2);
+                            Toast.makeText(MainActivity.this, "Allow microphone, then tap again", Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        if (id.equals(VoiceRec.recordingId())) {
+                            if (!VoiceRec.stop()) Toast.makeText(MainActivity.this, "Too short, try again", Toast.LENGTH_SHORT).show();
+                            refresh();
+                            return;
+                        }
+                        if (VoiceRec.isRecording()) {
+                            Toast.makeText(MainActivity.this, "Stop the other recording first", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        if (VoiceRec.start(MainActivity.this, id)) {
+                            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (id.equals(VoiceRec.recordingId())) {
+                                        VoiceRec.stop();
+                                        refresh();
+                                    }
+                                }
+                            }, VoiceRec.MAX_SECONDS * 1000L);
+                        } else {
+                            Toast.makeText(MainActivity.this, "Could not start recording", Toast.LENGTH_SHORT).show();
+                        }
+                        refresh();
+                    }
+                });
+
+                final Button book = makeButton(booked ? "\u2705 Booked" : "\uD83D\uDCE6 Book order", Color.parseColor(booked ? "#999999" : "#1F5E3F"));
+                book.setEnabled(!booked);
+                book.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (number.length() < 10) { noNumber(); return; }
+                        if (id.equals(VoiceRec.recordingId())) VoiceRec.stop();
+                        book.setEnabled(false);
+                        book.setText("Booking...");
+                        Booker.book(number, nameF, timeF, VoiceRec.fileFor(id), new Booker.Callback() {
+                            @Override
+                            public void onResult(boolean ok, String error) {
+                                if (ok) {
+                                    VoiceRec.discard(id);
+                                    Store.markBooked(MainActivity.this, id);
+                                    Toast.makeText(MainActivity.this, "Booked \u2705", Toast.LENGTH_SHORT).show();
+                                    openUri(Intent.ACTION_VIEW, "https://api.whatsapp.com/send?phone=91" + number
+                                            + "&text=" + Uri.encode(Store.bookedMessage(nameF, number)), null);
+                                } else {
+                                    Toast.makeText(MainActivity.this, "Booking failed: " + error, Toast.LENGTH_LONG).show();
+                                }
+                                refresh();
+                            }
+                        });
+                    }
+                });
+
+                LinearLayout bookRow = new LinearLayout(this);
+                bookRow.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                mp.setMargins(0, 0, dp(6), 0);
+                bookRow.addView(mic, mp);
+                bookRow.addView(book, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                LinearLayout.LayoutParams bkp = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                bkp.setMargins(0, dp(6), 0, 0);
+                card.addView(bookRow, bkp);
 
                 View line = new View(this);
                 line.setBackgroundColor(Color.parseColor("#DDDDDD"));
